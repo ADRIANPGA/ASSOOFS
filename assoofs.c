@@ -55,10 +55,71 @@ static struct inode_operations assoofs_inode_ops = {
     .lookup = assoofs_lookup,
     .mkdir = assoofs_mkdir,
 };
+static struct inode *assoofs_get_inode(struct super_block *sb, int ino);
 
 struct dentry *assoofs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags) {
-    printk(KERN_INFO "Lookup request\n");
+    /* Dado un nombre de fichero obtener su identificador
+    * Params: parent_inode(puntero al inodo padre), child_dentry(Se usa para pasarle el nombre) y flags sin relevancia 
+    * Devuelve una entrada de directorio (dentry) */
+
+    /* Variables necesarias paso 1 */
+    struct assoofs_inode_info *parent_info = parent_inode->i_private; // Informacion persistente del padre
+    struct super_block *sb = parent_inode->i_sb; // Se saca el superbloque
+    struct buffer_head *bh; // Un buffer head para leer un bloque
+
+    /* Variables necesarias paso 2 */
+    struct assoofs_dir_record_entry *record;
+    struct inode *inode;
+    int i;
+
+    /* 1.- Acceder al bloque de disco con el contenido del directorio apuntado por parent_inode */
+    bh = sb_bread(sb, parent_info->data_block_number); // Se lee el bloque que contiene la informacion del directorio parent
+    printk(KERN_INFO "Lookup request in inode %llu in the block %llu.\n", parent_info->inode_no, parent_info->data_block_number);
+
+    /* 2.- Recorrer este bloque de disco de forma secuencial */
+    record = (struct assoofs_dir_record_entry *)bh->b_data;
+    for (i = 0; i < parent_info->dir_children_count; i++) { // Se busca hasta dir_children_count
+        if (!strcmp(record->filename, child_dentry->d_name.name)) { // Se compara el fichero del puntero actual con el argumento
+            // Si son iguales ( el strcmp devuelve 0 si son iguales, por eso el !)
+            printk(KERN_INFO "File %s found in inode %llu at pos %d of the dir inode %llu.\n", record->filename, record->inode_no ,i, parent_info->inode_no);
+            inode = assoofs_get_inode(sb, record->inode_no); // Guardar la informacion del inodo en cuestion
+            inode_init_owner(inode, parent_inode, ((struct assoofs_inode_info *)inode->i_private)->mode); // Le damos padre y modo del inode
+            d_add(child_dentry, inode); // Se llama a la funcion que construye el arbol de inodos para que meta este
+            return NULL;
+        }
+        record++;
+    }
+
+    /* Si se sale del bucle es que no se encontro el inodo */
+    printk(KERN_ERR "Inode with filename %s not found.\n", child_dentry->d_name.name); //Control de errores
     return NULL;
+}
+
+static struct inode *assoofs_get_inode(struct super_block *sb, int ino){
+
+    /* El inodo que vamos a rellenar */
+    struct inode *inode;
+    struct assoofs_inode_info *inode_info;
+
+    /* 1.- Obtener la informacion persistente del inodo */
+    inode_info = assoofs_get_inode_info(sb, ino); 
+
+    /* 2.- Crear y asignar el campos al inodo */
+    inode = new_inode(sb); // Se crea
+    inode->i_ino = ino; // Se le asigna el numero al parametro
+    inode->i_sb = sb; // Se le asigna el superbloque de los parametros de funcion
+    inode->i_op = &assoofs_inode_ops; // Se le dan las operaciones al inodo (create, lookup y mkdir)
+    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode); //Asignamos el tiempo actual al tiempo de creacion acceso y modificacion
+    inode->i_private = inode_info; // Se guarda en el private la informacion persistente obtenida
+    // Segun si es directorio o archivo se le dan las operaciones especiales
+    if (S_ISDIR(inode_info->mode))
+        inode->i_fop = &assoofs_dir_operations;
+    else if (S_ISREG(inode_info->mode))
+        inode->i_fop = &assoofs_file_operations;
+    else
+        printk(KERN_ERR "Unknown inode type.\n"); //Control de errores
+
+    return inode;
 }
 
 
