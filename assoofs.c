@@ -78,31 +78,28 @@ ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, l
 	/* Paso 3 */
 	struct buffer_head *bh; // Un buffer head para leer un bloque
 	char *buffer;
-	/* Paso 6 */
+	/* Paso 5 */
 	struct super_block *sb;
 
 	/* 1.- Obtener la informacion persistente del inodo */
 	inode_info = filp->f_path.dentry->d_inode->i_private;
 
-	/* 2.- Comprobar el valor de ppos para ver si es mayor que el tam del fichero */
-	if(*ppos >= inode_info->file_size) return 0;
-
-	/* 3.- Acceder al contenido del fichero */
+	/* 2.- Acceder al contenido del fichero */
 	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number);
 	buffer = (char *)bh->b_data;
 
-	/* 4.- Copiamos a buf el contenido del fichero */
+	/* 3.- Copiamos a buf el contenido del fichero */
 	buffer += *ppos;
 	copy_from_user(buffer, buf, len);
 
-	/* 5.- Incrementar la posicion donde se comienza a leer */
+	/* 4.- Incrementar la posicion donde se comienza a leer */
 	*ppos += len;
 
 	mark_buffer_dirty(bh); // Se marca como sucio (Indicar al SO que hay que escribirlo al sacarlo de memoria)
 	sync_dirty_buffer(bh); // Se sincroniza, todos los cambios que haya en bh se llevan a disco
 	brelse(bh);
 
-	/* 6.- Devolver los bytes leidos */
+	/* 5.- Devolver los bytes leidos */
 	inode_info->file_size = *ppos;
 	sb = filp->f_path.dentry->d_inode->i_sb;
 	assoofs_save_inode_info(sb, inode_info);
@@ -440,10 +437,11 @@ static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode
 	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
 	inode_info->inode_no = inode->i_ino;
 	inode_info->dir_children_count = 0;
-	inode_info->mode = S_IFDIR | mode; // El segundo mode me llega como argumento
+	inode_info->mode = S_IFDIR | mode; // El mode me llega como argumento
 	inode_info->file_size = 0;
+
 	inode->i_private = inode_info; // No inode info
-	inode_init_owner(inode, dir, mode);
+	inode_init_owner(inode, dir, S_IFDIR | mode);
 	d_add(dentry, inode);
 
 	if(assoofs_sb_get_a_freeblock(sb, &inode_info->data_block_number) != 0){ //Funcion auxiliar que busca un bloque libre para el inodo
@@ -488,8 +486,6 @@ int assoofs_fill_super(struct super_block *sb, void *data, int silent) {
     struct assoofs_super_block_info *assoofs_sb; // assoofs superblock info (hecha por nosotros)
 
     struct inode *root_inode; // Variable necesaria en el paso 4 (Es un inodo)
-
-    printk(KERN_INFO "assoofs_fill_super request\n");
 
     /* 1.- Leer la información persistente del superbloque del dispositivo de bloques */
     // sb lo recibe assoofs_fill_super como argumento y es un puntero a una variable superbloque en memoria y ASSOOFS_SUPERBLOCK_NUMBER es un numero del 0 al 63 (El del superbloque es 0)
