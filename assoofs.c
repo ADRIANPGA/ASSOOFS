@@ -12,6 +12,11 @@
 ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t * ppos);
 ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, loff_t * ppos);
 
+/* Funciones auxiliares de create */
+int assoofs_sb_get_a_freeblock(struct super_block *sb, uint64_t *block);
+void assoofs_save_sb_info(struct super_block *vsb);
+void assoofs_add_inode_info(struct super_block *sb, struct assoofs_inode_info *inode);
+int assoofs_save_inode_info(struct super_block *sb, struct assoofs_inode_info *inode_info);
 
 const struct file_operations assoofs_file_operations = {
     .read = assoofs_read,
@@ -23,7 +28,7 @@ ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t *
 	* Parametros
 	* 1.- Fichero del que se quiere leer
 	* 2.- Ubicacion del buffer en el espacio de usuario
-	* 3.- La longitud La longitud donde se copiarian los datos
+	* 3.- La longitud 
 	* 4.- Deplazamiento donde se comienza a leer
 	*/
 
@@ -52,6 +57,7 @@ ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t *
 
 	/* 5.- Incrementar la posicion donde se comienza a leer */
 	*ppos += nbytes;
+	brelse(bh);
 
 	/* 6.- Devolver los bytes leidos */
 	return nbytes;
@@ -62,11 +68,45 @@ ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, l
 	* Parametros
 	* 1.- Fichero del que se quiere leer
 	* 2.- Ubicacion del buffer en el espacio de usuario
-	* 3.- La longitud La longitud donde se copiarian los datos
-	* 4.- Deplazamiento donde se comienza a leer
+	* 3.- La longitud
+	* 4.- Deplazamiento donde se comienza a escribir
 	*/
-    printk(KERN_INFO "Write request\n");
-    return 0;
+
+	/* Variables necesarias */
+	/* Paso 1 */
+	struct assoofs_inode_info *inode_info;
+	/* Paso 3 */
+	struct buffer_head *bh; // Un buffer head para leer un bloque
+	char *buffer;
+	/* Paso 6 */
+	struct super_block *sb;
+
+	/* 1.- Obtener la informacion persistente del inodo */
+	inode_info = filp->f_path.dentry->d_inode->i_private;
+
+	/* 2.- Comprobar el valor de ppos para ver si es mayor que el tam del fichero */
+	if(*ppos >= inode_info->file_size) return 0;
+
+	/* 3.- Acceder al contenido del fichero */
+	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number);
+	buffer = (char *)bh->b_data;
+
+	/* 4.- Copiamos a buf el contenido del fichero */
+	buffer += *ppos;
+	copy_from_user(buffer, buf, len);
+
+	/* 5.- Incrementar la posicion donde se comienza a leer */
+	*ppos += len;
+
+	mark_buffer_dirty(bh); // Se marca como sucio (Indicar al SO que hay que escribirlo al sacarlo de memoria)
+	sync_dirty_buffer(bh); // Se sincroniza, todos los cambios que haya en bh se llevan a disco
+	brelse(bh);
+
+	/* 6.- Devolver los bytes leidos */
+	inode_info->file_size = *ppos;
+	sb = filp->f_path.dentry->d_inode->i_sb;
+	assoofs_save_inode_info(sb, inode_info);
+	return len;
 }
 
 /*
@@ -90,12 +130,11 @@ static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
 	/* Paso 1 */
 	struct inode *inode;
 	struct super_block *sb;
-	assoofs_inode_info *inode_info;
+	struct assoofs_inode_info *inode_info;
 	/* Paso 4 */
 	struct buffer_head *bh; // Un buffer head para leer un bloque
 	struct assoofs_dir_record_entry *record;
 	int i;
-
 
 	/* 1.- Acceder al inodo del argumento filp */
 	inode = filp->f_path.dentry->d_inode; // Se obtiene el inodo del file
@@ -110,8 +149,8 @@ static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
 
 	/* 4.- Leer el bloque del contenido del directorio e inicializar ctx */
 	bh = sb_bread(sb, inode_info->data_block_number);
-	record = (struct assoofs_dir_record_entry *)bn->b_data;
-	for (int i = 0; i < inode_info->dir_children_count; i++){
+	record = (struct assoofs_dir_record_entry *)bh->b_data;
+	for (i = 0; i < inode_info->dir_children_count; i++){
 		/* Llamamos a dir-emit para añadir nuevas entradas al contexto */
 		dir_emit(ctx, record->filename, ASSOOFS_FILENAME_MAXLEN, record->inode_no, DT_UNKNOWN);
 		/* Incrementamos el pos un dir_record_entry */
@@ -137,11 +176,6 @@ static struct inode_operations assoofs_inode_ops = {
 };
 static struct inode *assoofs_get_inode(struct super_block *sb, int ino);
 
-/* Funciones auxiliares de create */
-int assoofs_sb_get_a_freeblock(struct super_block *sb, uint64_t *block);
-void assoofs_save_sb_info(struct super_block *vsb);
-void assoofs_add_inode_info(struct super_block *sb, struct assoofs_inode_info *inode);
-int assoofs_save_inode_info(struct super_block *sb, struct assoofs_inode_info *inode_info);
 struct assoofs_inode_info *assoofs_search_inode_info(struct super_block *sb, struct assoofs_inode_info *start, struct assoofs_inode_info *search);
 
 struct dentry *assoofs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags) {
@@ -240,6 +274,9 @@ static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode
 		return -EPERM;
 	}
 	inode->i_ino = count + 1; // Se le asigna el siguiente numero
+	inode->i_sb = sb; // asignar superbloque al inodo
+    inode->i_op = &assoofs_inode_ops; // asignar operaciones al inodo
+    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode); // asignar fechas al inodo
 	inode->i_fop=&assoofs_file_operations; //Es un fichero nunca un directorio (mkdir)
 	/* Asignar las propiedades del inodo */
 	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
@@ -395,6 +432,9 @@ static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode
 		return -EPERM;
 	}
 	inode->i_ino = count + 1; // Se le asigna el siguiente numero
+	inode->i_sb = sb; // asignar superbloque al inodo
+    inode->i_op = &assoofs_inode_ops; // asignar operaciones al inodo
+    inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode); // asignar fechas al inodo
 	inode->i_fop=&assoofs_dir_operations; //Es un directorio
 	/* Asignar las propiedades del inodo */
 	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
