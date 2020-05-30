@@ -19,11 +19,52 @@ const struct file_operations assoofs_file_operations = {
 };
 
 ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t * ppos) {
-    printk(KERN_INFO "Read request\n");
-    return 0;
+	/* 
+	* Parametros
+	* 1.- Fichero del que se quiere leer
+	* 2.- Ubicacion del buffer en el espacio de usuario
+	* 3.- La longitud La longitud donde se copiarian los datos
+	* 4.- Deplazamiento donde se comienza a leer
+	*/
+
+	/* Variables necesarias */
+	/* Paso 1 */
+	struct assoofs_inode_info *inode_info;
+	/* Paso 3 */
+	struct buffer_head *bh; // Un buffer head para leer un bloque
+	char *buffer;
+	/* Paso 4 */
+	int nbytes;
+
+	/* 1.- Obtener la informacion persistente del inodo */
+	inode_info = filp->f_path.dentry->d_inode->i_private;
+
+	/* 2.- Comprobar el valor de ppos para ver si es mayor que el tam del fichero */
+	if(*ppos >= inode_info->file_size) return 0;
+
+	/* 3.- Acceder al contenido del fichero */
+	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number);
+	buffer = (char *)bh->b_data;
+
+	/* 4.- Copiamos a buf el contenido del fichero */
+	nbytes = min((size_t) inode_info->file_size, len); // Hay que comparar len con el tam del fichero por si llegamos al final del fichero
+	copy_to_user(buf, buffer, nbytes); //Funcion auxiliar que copia nbytes de buffer en buf
+
+	/* 5.- Incrementar la posicion donde se comienza a leer */
+	*ppos += nbytes;
+
+	/* 6.- Devolver los bytes leidos */
+	return nbytes;
 }
 
 ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, loff_t * ppos) {
+	/* 
+	* Parametros
+	* 1.- Fichero del que se quiere leer
+	* 2.- Ubicacion del buffer en el espacio de usuario
+	* 3.- La longitud La longitud donde se copiarian los datos
+	* 4.- Deplazamiento donde se comienza a leer
+	*/
     printk(KERN_INFO "Write request\n");
     return 0;
 }
@@ -39,8 +80,47 @@ const struct file_operations assoofs_dir_operations = {
 };
 
 static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
-    printk(KERN_INFO "Iterate request\n");
-    return 0;
+	/* 
+	* Parametros
+	* 1.- Descriptor del fichero
+	* 2.- Contexto a inicializar
+	*/
+
+	/* Variables necesarias */
+	/* Paso 1 */
+	struct inode *inode;
+	struct super_block *sb;
+	assoofs_inode_info *inode_info;
+	/* Paso 4 */
+	struct buffer_head *bh; // Un buffer head para leer un bloque
+	struct assoofs_dir_record_entry *record;
+	int i;
+
+
+	/* 1.- Acceder al inodo del argumento filp */
+	inode = filp->f_path.dentry->d_inode; // Se obtiene el inodo del file
+	sb = inode->i_sb; // Se obtiene el superbloque
+	inode_info = inode->i_private; // Parte persistente del inodo
+
+	/* 2.- Comprobar si el contexto del directorio ya esta creado */
+	if(ctx->pos) return 0; // Si el campo pos del contexto es distinto de cero se acaba
+
+	/* 3.- Comprobar que el inodo del paso 1 es un directorio */
+	if((!S_ISDIR(inode_info->mode))) return -1;
+
+	/* 4.- Leer el bloque del contenido del directorio e inicializar ctx */
+	bh = sb_bread(sb, inode_info->data_block_number);
+	record = (struct assoofs_dir_record_entry *)bn->b_data;
+	for (int i = 0; i < inode_info->dir_children_count; i++){
+		/* Llamamos a dir-emit para añadir nuevas entradas al contexto */
+		dir_emit(ctx, record->filename, ASSOOFS_FILENAME_MAXLEN, record->inode_no, DT_UNKNOWN);
+		/* Incrementamos el pos un dir_record_entry */
+		ctx->pos += sizeof(struct assoofs_dir_record_entry);
+		record++;
+	}
+	brelse(bh);
+
+    return 0; //Todo ha ido bien
 }
 
 /*
@@ -171,7 +251,7 @@ static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	d_add(dentry, inode);
 
 	if(assoofs_sb_get_a_freeblock(sb, &inode_info->data_block_number) != 0){ //Funcion auxiliar que busca un bloque libre para el inodo
-		printk(KERN_ERR "assoofs can not hold more files. (%llu of %u).\n", count, ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED); //Control de errores
+		printk(KERN_ERR "assoofs can not hold more files. (%lld of %d).\n", count, ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED); //Control de errores
 		return -EPERM;
 	} 
 
@@ -287,8 +367,69 @@ struct assoofs_inode_info *assoofs_search_inode_info(struct super_block *sb, str
 }
 
 static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode) {
-    printk(KERN_INFO "New directory request\n");
-    return 0;
+   /* 
+	* Parametros
+	* 1- directorio al que va a estar asociado el archivo
+	* 2- la entrada en el dir padre de este archivo
+	* 3- los permisos
+	*/
+
+	/* Variables necesarias */
+	/* Paso 1 */
+	struct inode *inode;
+	struct assoofs_inode_info *inode_info;
+	struct super_block *sb;
+	uint64_t count;
+	/* Paso 2 */
+	struct assoofs_inode_info *parent_inode_info;
+	struct assoofs_dir_record_entry *dir_contents;
+	struct buffer_head *bh; // Un buffer head para leer un bloque
+	/* Paso 3 */
+
+	/* 1.- Crear el nuevo inodo */
+	sb = dir->i_sb; //Obtengo el superbloque del directorio padre
+	count = ((struct assoofs_super_block_info *)sb->s_fs_info)->inodes_count; // Obtengo el num inodos de la info persistente del sb
+	inode = new_inode(sb); // Se crea el inodo
+	if(count >= ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED /* (64) */){
+		printk(KERN_ERR "assoofs can not hold more files. (%lld of %d).\n", count, ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED); //Control de errores
+		return -EPERM;
+	}
+	inode->i_ino = count + 1; // Se le asigna el siguiente numero
+	inode->i_fop=&assoofs_dir_operations; //Es un directorio
+	/* Asignar las propiedades del inodo */
+	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
+	inode_info->inode_no = inode->i_ino;
+	inode_info->dir_children_count = 0;
+	inode_info->mode = S_IFDIR | mode; // El segundo mode me llega como argumento
+	inode_info->file_size = 0;
+	inode->i_private = inode_info; // No inode info
+	inode_init_owner(inode, dir, mode);
+	d_add(dentry, inode);
+
+	if(assoofs_sb_get_a_freeblock(sb, &inode_info->data_block_number) != 0){ //Funcion auxiliar que busca un bloque libre para el inodo
+		printk(KERN_ERR "assoofs can not hold more files. (%lld of %d).\n", count, ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED); //Control de errores
+		return -EPERM;
+	} 
+
+	assoofs_add_inode_info(sb, inode_info);
+
+	/* 2.- Modificar el contenido del directorio padre para meter el inodo */
+	parent_inode_info = dir->i_private; // Informacion persistente del inodo padre
+	bh = sb_bread(sb, parent_inode_info->data_block_number); // Creamos un buffer head para leer el bloque del directorio padre
+
+	dir_contents = (struct assoofs_dir_record_entry *)bh->b_data; 
+	dir_contents += parent_inode_info->dir_children_count; // Se avanza los hijos que ya tiene hasta el primer hueco libre
+	dir_contents->inode_no = inode_info->inode_no; // Se actualiza el numero de hijos
+	strcpy(dir_contents->filename, dentry->d_name.name); // Se copia el nombre
+	mark_buffer_dirty(bh); // Se marca como sucio (Indicar al SO que hay que escribirlo al sacarlo de memoria)
+	sync_dirty_buffer(bh); // Se sincroniza, todos los cambios que haya en bh se llevan a disco
+	brelse(bh); // Se libera el buffer head
+
+	/* 3.- Actualizar la informacion persistente del inodo padre */
+	parent_inode_info->dir_children_count++;
+	assoofs_save_inode_info(sb, parent_inode_info); // Funcion auxiliar que actualiza la informacion persistente del inodo padre 
+
+    return 0; // Todo ha ido bien 
 }
 
 /*
