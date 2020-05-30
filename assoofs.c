@@ -6,6 +6,15 @@
 #include <linux/slab.h>         /* kmem_cache            */
 #include "assoofs.h"
 
+static struct kmem_cache *assoofs_inode_cache;
+
+int assoofs_destroy_inode(struct inode *inode) {
+	struct assoofs_inode *inode_info = inode->i_private;
+	printk(KERN_INFO "Freeing private data of inode %p ( %lu)\n", inode_info, inode->i_ino);
+	kmem_cache_free(assoofs_inode_cache, inode_info);
+	return 0;
+}
+
 /*
  *  Operaciones sobre ficheros
  */
@@ -276,7 +285,7 @@ static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode
     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode); // asignar fechas al inodo
 	inode->i_fop=&assoofs_file_operations; //Es un fichero nunca un directorio (mkdir)
 	/* Asignar las propiedades del inodo */
-	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
+	inode_info = kmem_cache_alloc(assoofs_inode_cache, GFP_KERNEL); // Reservamos memoria (En cache)
 	inode_info->inode_no = inode->i_ino;
 	inode_info->mode = mode; // El segundo mode me llega como argumento
 	inode_info->file_size = 0;
@@ -434,7 +443,7 @@ static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode
     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode); // asignar fechas al inodo
 	inode->i_fop=&assoofs_dir_operations; //Es un directorio
 	/* Asignar las propiedades del inodo */
-	inode_info = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL); // Reservamos memoria
+	inode_info = kmem_cache_alloc(assoofs_inode_cache, GFP_KERNEL); // Reservamos memoria (En cache)
 	inode_info->inode_no = inode->i_ino;
 	inode_info->dir_children_count = 0;
 	inode_info->mode = S_IFDIR | mode; // El mode me llega como argumento
@@ -474,7 +483,7 @@ static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode
  *  Operaciones sobre el superbloque
  */
 static const struct super_operations assoofs_sops = {
-    .drop_inode = generic_delete_inode,
+    .drop_inode = assoofs_destroy_inode,
 };
 
 /*
@@ -544,7 +553,7 @@ struct assoofs_inode_info *assoofs_get_inode_info(struct super_block *sb, uint64
     /* En bucle se busca en el almacen desde 0 al ultimo inodo si coincide con nuestro parametro */
     for(i = 0; i < afs_sb->inodes_count; i++){
         if(inode_info->inode_no == inode_no){
-            buffer = kmalloc(sizeof(struct assoofs_inode_info), GFP_KERNEL);
+            buffer = kmem_cache_alloc(assoofs_inode_cache, GFP_KERNEL); // Reservamos memoria (En cache)
             memcpy(buffer, inode_info, sizeof(*buffer));
             break;
         }
@@ -591,6 +600,7 @@ static int __init assoofs_init(void) {
 
     printk(KERN_INFO "assoofs_init request\n");
     ret = register_filesystem(&assoofs_type);
+    assoofs_inode_cache = kmem_cache_create("assoofs_inode_cache", sizeof(struct assoofs_inode_info), 0, (SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD), NULL);
 
     /* Control de errores */
     if(ret != 0)
@@ -607,6 +617,7 @@ static void __exit assoofs_exit(void) {
 
     printk(KERN_INFO "assoofs_exit request\n");
     ret = unregister_filesystem(&assoofs_type);
+    kmem_cache_destroy(assoofs_inode_cache);
 
     /* Control de errores */
     if(ret != 0)
