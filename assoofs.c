@@ -6,6 +6,9 @@
 #include <linux/slab.h>         /* kmem_cache            */
 #include "assoofs.h"
 
+static DEFINE_MUTEX(assoofs_sb_lock);
+static DEFINE_MUTEX(assoofs_inodestore_lock);
+
 static struct kmem_cache *assoofs_inode_cache;
 
 int assoofs_destroy_inode(struct inode *inode) {
@@ -20,12 +23,6 @@ int assoofs_destroy_inode(struct inode *inode) {
  */
 ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t * ppos);
 ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, loff_t * ppos);
-
-/* Funciones auxiliares de create */
-int assoofs_sb_get_a_freeblock(struct super_block *sb, uint64_t *block);
-void assoofs_save_sb_info(struct super_block *vsb);
-void assoofs_add_inode_info(struct super_block *sb, struct assoofs_inode_info *inode);
-int assoofs_save_inode_info(struct super_block *sb, struct assoofs_inode_info *inode_info);
 
 const struct file_operations assoofs_file_operations = {
     .read = assoofs_read,
@@ -57,7 +54,9 @@ ssize_t assoofs_read(struct file * filp, char __user * buf, size_t len, loff_t *
 	if(*ppos >= inode_info->file_size) return 0;
 
 	/* 3.- Acceder al contenido del fichero */
-	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number);
+	mutex_lock_interruptible(&assoofs_sb_lock);
+	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number); // Se lee ese inodo del superbloque
+	mutex_unlock(&assoofs_sb_lock);
 	buffer = (char *)bh->b_data;
 
 	/* 4.- Copiamos a buf el contenido del fichero */
@@ -94,7 +93,9 @@ ssize_t assoofs_write(struct file * filp, const char __user * buf, size_t len, l
 	inode_info = filp->f_path.dentry->d_inode->i_private;
 
 	/* 2.- Acceder al contenido del fichero */
-	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number);
+	mutex_lock_interruptible(&assoofs_sb_lock);
+	bh = sb_bread(filp->f_path.dentry->d_inode->i_sb, inode_info->data_block_number); // Se lee ese inodo del superbloque
+	mutex_unlock(&assoofs_sb_lock);	
 	buffer = (char *)bh->b_data;
 
 	/* 3.- Copiamos a buf el contenido del fichero */
@@ -144,7 +145,6 @@ static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
 
 	/* 1.- Acceder al inodo del argumento filp */
 	inode = filp->f_path.dentry->d_inode; // Se obtiene el inodo del file
-	sb = inode->i_sb; // Se obtiene el superbloque
 	inode_info = inode->i_private; // Parte persistente del inodo
 
 	/* 2.- Comprobar si el contexto del directorio ya esta creado */
@@ -154,7 +154,10 @@ static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
 	if((!S_ISDIR(inode_info->mode))) return -1;
 
 	/* 4.- Leer el bloque del contenido del directorio e inicializar ctx */
+	mutex_lock_interruptible(&assoofs_sb_lock);
+	sb = inode->i_sb; // Se obtiene el superbloque
 	bh = sb_bread(sb, inode_info->data_block_number);
+	mutex_unlock(&assoofs_sb_lock);
 	record = (struct assoofs_dir_record_entry *)bh->b_data;
 	for (i = 0; i < inode_info->dir_children_count; i++){
 		/* Llamamos a dir-emit para añadir nuevas entradas al contexto */
@@ -171,6 +174,13 @@ static int assoofs_iterate(struct file *filp, struct dir_context *ctx) {
 /*
  *  Operaciones sobre inodos
  */
+
+/* Funciones auxiliares de create */
+int assoofs_sb_get_a_freeblock(struct super_block *sb, uint64_t *block);
+void assoofs_save_sb_info(struct super_block *vsb);
+void assoofs_add_inode_info(struct super_block *sb, struct assoofs_inode_info *inode);
+int assoofs_save_inode_info(struct super_block *sb, struct assoofs_inode_info *inode_info);
+
 static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl);
 struct dentry *assoofs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags);
 static int assoofs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
@@ -191,7 +201,7 @@ struct dentry *assoofs_lookup(struct inode *parent_inode, struct dentry *child_d
 
     /* Variables necesarias paso 1 */
     struct assoofs_inode_info *parent_info = parent_inode->i_private; // Informacion persistente del padre
-    struct super_block *sb = parent_inode->i_sb; // Se saca el superbloque
+    struct super_block *sb;
     struct buffer_head *bh; // Un buffer head para leer un bloque
 
     /* Variables necesarias paso 2 */
@@ -200,8 +210,12 @@ struct dentry *assoofs_lookup(struct inode *parent_inode, struct dentry *child_d
     int i;
 
     /* 1.- Acceder al bloque de disco con el contenido del directorio apuntado por parent_inode */
+    mutex_lock_interruptible(&assoofs_sb_lock);
+    sb = parent_inode->i_sb; // Se saca el superbloque
     bh = sb_bread(sb, parent_info->data_block_number); // Se lee el bloque que contiene la informacion del directorio parent
+    mutex_unlock(&assoofs_sb_lock);
     printk(KERN_INFO "Lookup request in inode %llu in the block %llu.\n", parent_info->inode_no, parent_info->data_block_number);
+
 
     /* 2.- Recorrer este bloque de disco de forma secuencial */
     record = (struct assoofs_dir_record_entry *)bh->b_data;
@@ -272,7 +286,9 @@ static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	/* Paso 3 */
 
 	/* 1.- Crear el nuevo inodo */
+	mutex_lock_interruptible(&assoofs_sb_lock);
 	sb = dir->i_sb; //Obtengo el superbloque del directorio padre
+	mutex_unlock(&assoofs_sb_lock);
 	count = ((struct assoofs_super_block_info *)sb->s_fs_info)->inodes_count; // Obtengo el num inodos de la info persistente del sb
 	inode = new_inode(sb); // Se crea el inodo
 	if(count >= ASSOOFS_MAX_FILESYSTEM_OBJECTS_SUPPORTED /* (64) */){
@@ -302,12 +318,16 @@ static int assoofs_create(struct inode *dir, struct dentry *dentry, umode_t mode
 
 	/* 2.- Modificar el contenido del directorio padre para meter el inodo */
 	parent_inode_info = dir->i_private; // Informacion persistente del inodo padre
+
+	mutex_lock_interruptible(&assoofs_sb_lock);
 	bh = sb_bread(sb, parent_inode_info->data_block_number); // Creamos un buffer head para leer el bloque del directorio padre
+	mutex_unlock(&assoofs_sb_lock);
 
 	dir_contents = (struct assoofs_dir_record_entry *)bh->b_data; 
 	dir_contents += parent_inode_info->dir_children_count; // Se avanza los hijos que ya tiene hasta el primer hueco libre
 	dir_contents->inode_no = inode_info->inode_no; // Se actualiza el numero de hijos
 	strcpy(dir_contents->filename, dentry->d_name.name); // Se copia el nombre
+
 	mark_buffer_dirty(bh); // Se marca como sucio (Indicar al SO que hay que escribirlo al sacarlo de memoria)
 	sync_dirty_buffer(bh); // Se sincroniza, todos los cambios que haya en bh se llevan a disco
 	brelse(bh); // Se libera el buffer head
@@ -342,7 +362,9 @@ void assoofs_save_sb_info(struct super_block *vsb){
 	struct buffer_head *bh; // Se crea un buffer head para leer un bloque
 	struct assoofs_super_block *sb; // Informacion persistente del superbloque en memoria
 
+	mutex_lock_interruptible(&assoofs_sb_lock);
 	bh = sb_bread(vsb, ASSOOFS_SUPERBLOCK_BLOCK_NUMBER); // Me traigo de disco el bloque del superbloque
+	mutex_unlock(&assoofs_sb_lock);
 	sb = vsb->s_fs_info; // Cojo la informacion de memoria del parametro
 	bh->b_data = (char *)sb; // Sobreescribo los datos de disco con la informacion en memoria
 
@@ -361,8 +383,10 @@ void assoofs_add_inode_info(struct super_block *sb, struct assoofs_inode_info *i
 	struct buffer_head *bh; // Se crea un buffer head para leer un bloque
 	struct assoofs_inode_info *inode_info;
 	struct assoofs_super_block_info *assoofs_sb = (struct assoofs_super_block_info *)sb->s_fs_info;
-
+	
+	mutex_lock_interruptible(&assoofs_inodestore_lock);
 	bh = sb_bread(sb, ASSOOFS_INODESTORE_BLOCK_NUMBER); // Se lee de disco el bloque que contiene el almacen de inodos (1)
+	mutex_unlock(&assoofs_inodestore_lock);
 	inode_info = (struct assoofs_inode_info *)bh->b_data; // Se guarda en una variable el bloque leido (Apuntando al principio)
 	inode_info += assoofs_sb->inodes_count; // Para que apunte al ultimo se avanza el numero de inodos (Apunta justo al final)
 	memcpy(inode_info, inode, sizeof(struct assoofs_inode_info)); // Copio de memoria en inode_info en inode parametro
@@ -378,7 +402,9 @@ int assoofs_save_inode_info(struct super_block *sb, struct assoofs_inode_info *i
 	struct buffer_head *bh; // Se crea un buffer head para leer un bloque
 	struct assoofs_inode_info *inode_pos;
 
+	mutex_lock_interruptible(&assoofs_inodestore_lock);
 	bh = sb_bread(sb, ASSOOFS_INODESTORE_BLOCK_NUMBER); // Se lee de disco el bloque que contiene el almacen de inodos (1)
+	mutex_unlock(&assoofs_inodestore_lock);
 	inode_pos = assoofs_search_inode_info(sb, (struct assoofs_inode_info *)bh->b_data, inode_info); // Se usa una funcion auxiliar para buscar este inodo en el almacen
 
 	if(inode_pos != NULL){
@@ -462,7 +488,9 @@ static int assoofs_mkdir(struct inode *dir , struct dentry *dentry, umode_t mode
 
 	/* 2.- Modificar el contenido del directorio padre para meter el inodo */
 	parent_inode_info = dir->i_private; // Informacion persistente del inodo padre
+	mutex_lock_interruptible(&assoofs_sb_lock);
 	bh = sb_bread(sb, parent_inode_info->data_block_number); // Creamos un buffer head para leer el bloque del directorio padre
+	mutex_unlock(&assoofs_sb_lock);
 
 	dir_contents = (struct assoofs_dir_record_entry *)bh->b_data; 
 	dir_contents += parent_inode_info->dir_children_count; // Se avanza los hijos que ya tiene hasta el primer hueco libre
@@ -548,7 +576,9 @@ struct assoofs_inode_info *assoofs_get_inode_info(struct super_block *sb, uint64
     struct assoofs_inode_info *buffer = NULL;
     int i;
 
-    bh = sb_bread(sb, ASSOOFS_INODESTORE_BLOCK_NUMBER);  
+    mutex_lock_interruptible(&assoofs_inodestore_lock);
+	bh = sb_bread(sb, ASSOOFS_INODESTORE_BLOCK_NUMBER); // Se lee de disco el bloque que contiene el almacen de inodos (1)
+	mutex_unlock(&assoofs_inodestore_lock);
     inode_info = (struct assoofs_inode_info *)bh->b_data;
     /* En bucle se busca en el almacen desde 0 al ultimo inodo si coincide con nuestro parametro */
     for(i = 0; i < afs_sb->inodes_count; i++){
